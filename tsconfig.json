@@ -5,6 +5,12 @@
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
+    /* Beyond `strict`: reading past the end of an array yields `T | undefined`
+       instead of `T`. The player indexes a chunk queue constantly
+       (chunks[i + 1] for lookahead), and this is the compiler catching the
+       off-by-one at the end of the document. Cost: real index reads need a
+       guard. See ARCHITECTURE.md. */
+    "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
@@ -22,6 +28,12 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.mts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }
