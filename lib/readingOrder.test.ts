@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildLines,
   detectColumnSplit,
+  positionedItemFrom,
   toReadingOrder,
   type PositionedItem,
 } from "./readingOrder";
@@ -191,5 +192,49 @@ describe("toReadingOrder", () => {
 
   it("returns an empty string for a page with no text", () => {
     expect(toReadingOrder([], PAGE_WIDTH)).toBe("");
+  });
+});
+
+describe("positionedItemFrom", () => {
+  /** A pdf.js text item as it actually arrives: a 6-element text matrix. */
+  const raw = (
+    str: string,
+    transform: unknown[],
+    width = 40,
+    height = 10,
+  ): unknown => ({ str, transform, width, height, dir: "ltr", fontName: "g_d0", hasEOL: false });
+
+  it("reads x and y out of the transform", () => {
+    const item = positionedItemFrom(raw("Hello", [10, 0, 0, 10, 72.5, 700.25]));
+    expect(item).toEqual({ text: "Hello", x: 72.5, y: 700.25, width: 40, height: 10 });
+  });
+
+  it("rejects rotated text", () => {
+    // A 90-degree rotation: the arXiv stamp down the side of a preprint. It
+    // has no place in a left-to-right reading order and, left in, it lands
+    // mid-paragraph and severs a sentence.
+    expect(positionedItemFrom(raw("arXiv:1512.03385v1", [0, 10, -10, 0, 20, 400]))).toBeNull();
+  });
+
+  it("accepts text a hair off horizontal", () => {
+    // Slightly skewed body text is still body text; only real rotation goes.
+    expect(positionedItemFrom(raw("Slightly skewed", [10, 0.2, 0, 10, 50, 400]))).not.toBeNull();
+  });
+
+  it("rejects a malformed or non-numeric transform", () => {
+    expect(positionedItemFrom(raw("x", [10, 0, 0, 10]))).toBeNull();
+    expect(positionedItemFrom(raw("x", [10, 0, 0, 10, "72", 700]))).toBeNull();
+    expect(positionedItemFrom(raw("x", [10, 0, 0, 10, Number.NaN, 700]))).toBeNull();
+    expect(positionedItemFrom({ str: "x" })).toBeNull();
+    expect(positionedItemFrom(null)).toBeNull();
+  });
+
+  it("rejects a marked-content item, which carries no position", () => {
+    expect(positionedItemFrom({ type: "beginMarkedContent", id: "p1" })).toBeNull();
+  });
+
+  it("defaults a missing width or height to zero rather than NaN", () => {
+    const item = positionedItemFrom({ str: "x", transform: [10, 0, 0, 10, 5, 5] });
+    expect(item).toEqual({ text: "x", x: 5, y: 5, width: 0, height: 0 });
   });
 });

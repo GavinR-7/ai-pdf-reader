@@ -13,6 +13,7 @@ import * as pdfjs from "pdfjs-dist";
 import type { PageText } from "./types";
 import {
   detectColumnSplit,
+  positionedItemFrom,
   toReadingOrder,
   type PositionedItem,
 } from "./readingOrder";
@@ -88,47 +89,6 @@ export class PdfExtractionError extends Error {
 }
 
 /**
- * Narrow one pdf.js text item into a `PositionedItem`.
- *
- * pdf.js declares `TextItem.transform` as `Array<any>`, so `transform[4]` and
- * `transform[5]` — the x and y translation of the text matrix — arrive with no
- * type at all. Hard rule 2 bans `any` in our code, and more importantly a cast
- * here would be a lie: nothing guarantees those entries are numbers.
- *
- * So this is the one place the untyped surface is touched, and it is handled
- * with a runtime check rather than an assertion. Items that fail it are
- * dropped: an item with no position cannot be placed in reading order, and
- * silently losing a stray run is better than poisoning the geometry with NaN.
- */
-function toPositionedItem(item: unknown): PositionedItem | null {
-  if (typeof item !== "object" || item === null) return null;
-  if (!("str" in item) || !("transform" in item)) return null;
-
-  const { str, transform, width, height } = item as {
-    str: unknown;
-    transform: unknown;
-    width?: unknown;
-    height?: unknown;
-  };
-
-  if (typeof str !== "string") return null;
-  if (!Array.isArray(transform)) return null;
-
-  const x: unknown = transform[4];
-  const y: unknown = transform[5];
-  if (typeof x !== "number" || typeof y !== "number") return null;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-
-  return {
-    text: str,
-    x,
-    y,
-    width: typeof width === "number" && Number.isFinite(width) ? width : 0,
-    height: typeof height === "number" && Number.isFinite(height) ? height : 0,
-  };
-}
-
-/**
  * Read a PDF in the browser and return its text, page by page, in reading
  * order.
  *
@@ -186,7 +146,7 @@ export async function extractPdf(
 
         const items: PositionedItem[] = [];
         for (const raw of content.items) {
-          const positioned = toPositionedItem(raw);
+          const positioned = positionedItemFrom(raw);
           if (positioned !== null) items.push(positioned);
         }
 

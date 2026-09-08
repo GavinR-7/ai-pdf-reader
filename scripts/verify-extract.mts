@@ -1,5 +1,10 @@
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { toReadingOrder, detectColumnSplit, type PositionedItem } from "../lib/readingOrder.ts";
+import {
+  toReadingOrder,
+  detectColumnSplit,
+  positionedItemFrom,
+  type PositionedItem,
+} from "../lib/readingOrder.ts";
 
 const file = process.argv[2] ?? "";
 const pages = process.argv.slice(3).map(Number);
@@ -12,11 +17,8 @@ for (const pageNo of pages) {
   const content = await page.getTextContent();
   const items: PositionedItem[] = [];
   for (const it of content.items) {
-    if (!("str" in it)) continue;
-    const t = it.transform;
-    const x = t[4], y = t[5];
-    if (typeof x !== "number" || typeof y !== "number") continue;
-    items.push({ text: it.str, x, y, width: it.width, height: it.height });
+    const positioned = positionedItemFrom(it);
+    if (positioned !== null) items.push(positioned);
   }
   const split = detectColumnSplit(items, viewport.width);
   const text = toReadingOrder(items, viewport.width);

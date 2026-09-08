@@ -40,6 +40,66 @@ export interface PositionedItem {
   height: number;
 }
 
+/**
+ * Narrow one pdf.js text item into a `PositionedItem`, or reject it.
+ *
+ * pdf.js declares `TextItem.transform` as `Array<any>`, so the text matrix
+ * arrives with no type at all. Hard rule 2 bans `any` in our code, and a cast
+ * would be a lie — nothing guarantees those entries are numbers. This is the
+ * one place that surface is touched, and it is handled with runtime checks.
+ *
+ * It lives in this module, rather than beside the pdf.js calls, because it
+ * needs no pdf.js import — the check is purely structural — and putting it
+ * here makes the quarantine a pure, unit-tested function instead of something
+ * only reachable through a browser.
+ *
+ * The transform is the 6-element matrix `[a, b, c, d, e, f]`: `e`/`f` are the
+ * translation (the item's x and y), and `a`/`b` give the baseline's direction.
+ *
+ * Returns `null` for anything unusable:
+ *
+ *   - a malformed or non-numeric transform, because a `NaN` coordinate
+ *     poisons the geometry for the whole page rather than just itself;
+ *   - **rotated text**, more than ~3° off horizontal. Everything downstream
+ *     assumes left-to-right rows sharing a baseline, so a rotated run has no
+ *     meaningful place in reading order. In practice this is the vertical
+ *     arXiv stamp down the side of page 1, which otherwise lands in the middle
+ *     of a paragraph and severs a sentence.
+ */
+export function positionedItemFrom(raw: unknown): PositionedItem | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  if (!("str" in raw) || !("transform" in raw)) return null;
+
+  const { str, transform, width, height } = raw as {
+    str: unknown;
+    transform: unknown;
+    width?: unknown;
+    height?: unknown;
+  };
+
+  if (typeof str !== "string") return null;
+  if (!Array.isArray(transform) || transform.length < 6) return null;
+
+  const a: unknown = transform[0];
+  const b: unknown = transform[1];
+  const x: unknown = transform[4];
+  const y: unknown = transform[5];
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (typeof a !== "number" || typeof b !== "number") return null;
+
+  const scale = Math.hypot(a, b);
+  if (scale > 0 && Math.abs(b) / scale > 0.05) return null;
+
+  return {
+    text: str,
+    x,
+    y,
+    width: typeof width === "number" && Number.isFinite(width) ? width : 0,
+    height: typeof height === "number" && Number.isFinite(height) ? height : 0,
+  };
+}
+
 /** A run of items sharing a baseline, in left-to-right order. */
 export interface Line {
   text: string;

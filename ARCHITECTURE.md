@@ -3,7 +3,7 @@
 A running record of the decisions in this codebase: what was chosen, what the
 alternative was, and why this one won. Appended to as each phase lands.
 
-**Status:** Phase 1 complete (extraction and reading order).
+**Status:** Phase 2 complete (sentence chunking).
 
 ---
 
@@ -291,6 +291,127 @@ touched. It validates with `typeof` and `Number.isFinite` and returns
 position cannot be placed in reading order and a `NaN` would poison the
 geometry for the whole page. One boundary, one runtime check, honest types
 everywhere downstream.
+
+---
+
+## Sentence chunking (Phase 2)
+
+`lib/chunker.ts` is a pure function `(pages: PageText[]) => Chunk[]` with 46
+tests. It has no dependency, by choice.
+
+### Why sentence-level granularity
+
+The alternatives, and what each costs:
+
+| Unit | Why not |
+|---|---|
+| **Paragraph** | Too coarse for all three jobs at once. A paragraph is 30–60 seconds of audio, so pause/resume and "jump back one" are useless; the highlight covers half the screen and stops telling you where you are; and a citation to a paragraph is barely a citation — the reader still has to hunt for the sentence the claim came from. |
+| **Fixed token count** | Cuts mid-sentence by construction. Speech synthesis needs a complete clause to get prosody right, so a 200-token chunk boundary lands mid-phrase and the reader hears the sentence break in the wrong place. It also makes citations meaningless: "chunk 12" is not a thing a person can point at in the document. |
+| **Sentence** | Matches all three consumers. It is one natural utterance, one comfortable highlight, and the smallest unit a claim can honestly be traced to. |
+
+The catch is that sentences vary from 3 to 900 characters, which is why the
+long-sentence rule below exists — it keeps the *upper* end bounded without
+giving up the natural unit.
+
+### Why rules, not an NLP library
+
+A sentence splitter is a well-understood problem with a short list of hard
+cases, and the whole list appears in the tests. A library (`compromise`,
+`sbd`, a wasm build of spaCy) would add 100KB+ to a client bundle to solve a
+problem that is ~150 lines here, and — more to the point — the failure modes
+would be unexplainable. When this splitter breaks, the rule that broke is
+visible and has a test next to it.
+
+### The rules
+
+Each has a test, named after the case:
+
+- **Blocks first.** The extractor emits `\n` where it saw real vertical
+  structure. No sentence crosses one, which is what keeps a heading from being
+  glued to the paragraph beneath it.
+- **Abbreviations.** A dot after a known abbreviation is never terminal:
+  `Dr.`, `Fig.`, `et al.`, `Inc.`, `vs.`, month names, and ~60 others.
+- **Single letters.** One letter before a dot is an initial (`J. R. R.
+  Tolkien`) or dotted shorthand (`e.g.`, `i.e.`, `U.S.`).
+- **Decimals.** A dot between two digits is never terminal: `3.14`, `$1.5M`,
+  `Section 2.1`.
+- **Enumerators.** Digits then a dot, *at the start of a block*, are a section
+  or list number: `3. Deep Residual Learning` stays whole. The restriction to
+  block-start is what distinguishes it from a number that really does end a
+  sentence — "the total was 42. The next year…" still splits. This was a real
+  bug caught by running the chunker over the ResNet paper.
+- **Ellipses.** Never a boundary. `He waited ... and then he left` is one
+  sentence; treating the run as terminal splits far more often than it helps.
+  Costs the rare `Wait... Who said that?`.
+- **Closing punctuation.** A boundary may sit after quotes and brackets:
+  `He said "Stop." Then he left.` splits correctly, and so do citations —
+  `… earlier [3].` and `… documented (Smith 2020).`
+- **A lowercase next word cancels the boundary.** If a full stop is followed by
+  lowercase, it was an abbreviation this list does not know about.
+- **No terminal punctuation is still a chunk.** Headings and fragments are
+  content and must be readable and citable.
+
+**The abbreviation trade-off, stated plainly.** The rule is conservative: it
+*never* splits after a known abbreviation. So a sentence genuinely ending in
+one — "…as shown by Smith et al. The method then…" — stays merged with the
+next. That is the deliberate direction to be wrong in: over-splitting severs a
+sentence, which corrupts an utterance, a highlight, and a citation target
+simultaneously; under-splitting yields one chunk that is merely longer than
+ideal.
+
+### Sentences that span a page break
+
+Pages are concatenated with a **space, not a newline**. Newlines are reserved
+for block boundaries *within* a page, where the extractor saw real structure.
+This is what lets a sentence broken across a page break come out as one chunk,
+and a word broken across it be rejoined (`recon-` + `figured`).
+
+The chunk keeps the page it **started** on, so clicking a citation lands where
+the thought begins rather than mid-clause on the following page.
+
+Cost: a page ending with a heading and no punctuation runs into the next
+page's first sentence. Rare, and far cheaper than severing every sentence that
+crosses a page.
+
+### Long sentences
+
+Over **400 characters**, a sentence is split at clause boundaries. The limit
+comes from the audio queue, not the text: one chunk is one utterance, and an
+utterance is the smallest thing a listener can rewind to or skip between. A
+900-character sentence is a 40-second block with no way to navigate inside it.
+400 characters is roughly 20 seconds of speech — long enough that ordinary
+prose is never cut, short enough that a pathological legal sentence stays
+steerable.
+
+Separators are tried strongest-first — `;` then `:` then em-dash then
+`, and`/`, but`/`, which` then any comma — and the chosen cut is the one
+**nearest the middle**, not the first match. Splitting at the first match
+shaves one clause off the front and leaves a 350-character remainder; splitting
+near the middle gives two readable halves. Each half is then reconsidered
+recursively. A run-on with no punctuation at all falls back to the last word
+break before the limit, which always makes progress, so the recursion
+terminates.
+
+### Offsets survive trimming
+
+`charStart` is maintained through every trim and split — when leading
+whitespace is removed from a chunk, the offset moves with it. Getting this
+wrong is invisible in the UI and quietly corrupts the one field that exists to
+outlive the chunking rules. There is a test that slices the original document
+text at `charStart` and asserts it reproduces the chunk exactly.
+
+### Verified against real documents
+
+`scripts/verify-chunks.mts` runs extraction plus chunking over a real PDF.
+Across 10 pages each of the two fixtures: ids sequential, offsets strictly
+ascending, page numbers non-decreasing, and no chunk over the limit.
+
+About 7% of chunks begin with a lowercase letter — the rough signal for a bad
+split. Inspecting them, essentially all are *extraction* artifacts rather than
+chunking errors: in-figure axis labels ("weight layer", "relu"), e-mail
+addresses, and linearised mathematics. Removing rotated text (the vertical
+arXiv stamp down the side of page 1) fixed the one class that was genuinely
+severing sentences.
 
 ---
 
