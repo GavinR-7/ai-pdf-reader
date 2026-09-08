@@ -1,26 +1,78 @@
 @import "tailwindcss";
 
+/*
+ * A reading interface, so the palette is paper rather than screen: a warm
+ * off-white ground and a soft near-black ink, both a long way from #fff/#000.
+ * Pure white at a comfortable reading size is glare; pure black is a harsh
+ * edge. The warmth is what makes a long document feel like a page.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --paper: #fbf9f5;
+  --paper-raised: #ffffff;
+  --ink: #1f1b16;
+  --ink-muted: #6b6355;
+  --ink-faint: #9a9184;
+  --rule: #e7e0d4;
+  --accent: #9a5b2c;
+  --accent-soft: #f3e3d2;
+  /* The active-sentence wash. Deliberately a tint, not a block: a hard
+     highlight fights the text it is meant to help you follow. */
+  --highlight: #f7e6c4;
+  --highlight-edge: #d9a441;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --paper: #14120f;
+    --paper-raised: #1c1916;
+    --ink: #e8e2d6;
+    --ink-muted: #a89f90;
+    --ink-faint: #756c5e;
+    --rule: #2e2a24;
+    --accent: #d9a441;
+    --accent-soft: #2c241a;
+    --highlight: #3a2f1c;
+    --highlight-edge: #a37c2c;
   }
 }
 
+@theme inline {
+  --color-paper: var(--paper);
+  --color-paper-raised: var(--paper-raised);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-rule: var(--rule);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-highlight: var(--highlight);
+  --color-highlight-edge: var(--highlight-edge);
+  --font-serif: var(--font-reading);
+  --font-sans: var(--font-ui);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
+}
+
+/*
+ * The reading measure. ~66 characters is the classic line length for sustained
+ * reading; much wider and the eye loses its place on the return sweep.
+ * Expressed in `ch` so it tracks the font rather than a guessed pixel width.
+ */
+.measure {
+  max-width: 66ch;
+}
+
+/* Respect a reader who has asked the OS for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

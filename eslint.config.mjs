@@ -42,6 +42,10 @@ const eslintConfig = [
       "out/**",
       "build/**",
       "next-env.d.ts",
+      // Third-party minified assets copied out of pdfjs-dist at build time by
+      // scripts/copy-pdf-assets.mjs. Not our code, and linting a 1.3MB
+      // minified worker buries real findings under ~1500 spurious ones.
+      "public/**",
     ],
   },
 ];

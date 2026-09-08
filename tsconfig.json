@@ -16,6 +16,10 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    /* scripts/verify-extract.mts runs under Node's native type stripping, which
+       requires import specifiers to carry the real ".ts" extension. Safe here
+       because noEmit is set, so TypeScript never has to rewrite a path. */
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,

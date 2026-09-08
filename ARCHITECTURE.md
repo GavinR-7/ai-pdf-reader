@@ -3,7 +3,7 @@
 A running record of the decisions in this codebase: what was chosen, what the
 alternative was, and why this one won. Appended to as each phase lands.
 
-**Status:** Phase 0 complete (scaffold and domain types).
+**Status:** Phase 1 complete (extraction and reading order).
 
 ---
 
@@ -123,6 +123,174 @@ allows chunking rules to be tested with a string literal instead of a PDF
 fixture, a browser, and a worker thread. The alternative — chunking directly
 from pdf.js text items — welds the two phases together and makes the
 most rule-dense code in the app the hardest to test.
+
+---
+
+## Reading order (Phase 1)
+
+### The problem
+
+pdf.js does not return paragraphs. `getTextContent()` returns *text runs* with
+a position, in content-stream order — which is drawing order, not reading
+order. On a two-column paper, concatenating them (or sorting by vertical
+position) interleaves the columns: line 1 of the left column, line 1 of the
+right, line 2 of the left, and so on. The output is unreadable, and every
+downstream feature inherits it.
+
+The work is split so the hard part is testable:
+
+| Module | Job | Testable how |
+|---|---|---|
+| `lib/extractPdf.ts` | pdf.js, workers, files, progress | by hand, in a browser |
+| `lib/readingOrder.ts` | all layout reasoning, pure | 17 unit tests, no PDF needed |
+
+### Why the pdf.js worker is copied into `public/`
+
+pdf.js starts its parser with `new Worker(workerSrc)`, and that constructor
+takes **a URL the browser fetches at run time**, not a module specifier a
+bundler can follow. Pointing it into `node_modules` fails four separate ways,
+and the failure mode is a silent hang rather than an error:
+
+1. `node_modules` is not served — nothing under it has a URL in production.
+2. Importing the worker instead asks the bundler to inline ~1.3MB of parser
+   into the main client chunk. A worker is a *separate execution context*;
+   code pulled into the page's context is not a worker, and pdf.js will not
+   use it as one.
+3. The `new URL("…", import.meta.url)` trick some bundlers special-case is
+   handled inconsistently by Turbopack between dev and production, so it can
+   work locally and break on Vercel.
+4. A CDN copy works but decouples the worker's version from the installed one.
+   pdf.js compares the two and refuses to run on a mismatch, so `npm update`
+   would break the app at run time instead of at build time.
+
+`scripts/copy-pdf-assets.mjs` therefore copies the worker, `standard_fonts/`
+(base-14 font metrics) and `cmaps/` (CJK character maps) out of the installed
+package on `postinstall` and `prebuild`. The served files are version-locked to
+the API by construction, and `public/pdfjs/` is gitignored because it is
+generated, not authored.
+
+### The column-detection heuristic
+
+**A real gutter is a vertical line that almost nothing crosses.** So sweep a
+candidate split across the middle half of the page and, for each position,
+count the text items straddling it. A two-column page has a position where that
+count collapses to nearly zero while both sides still hold plenty of text. A
+single-column page has no such position, because every full-width line crosses
+every candidate.
+
+Measured across the two fixtures in `test-pdfs/`:
+
+| Layout | Straddling items at best split | Balance (lighter side's share) |
+|---|---|---|
+| ResNet, CVPR two-column, pp. 1–8 | **0–3%** | 39–49% |
+| "Attention Is All You Need", single column, pp. 1–8 | **12–44%** | 6–37% |
+
+The two populations do not overlap, and the thresholds sit in the empty gap
+between them: **≤6% straddle** and **≥25% balance**, with at least 20 items on
+the page before guessing at all.
+
+Two details matter more than the numbers:
+
+- **Count items, not lines.** Left- and right-column text on the same visual
+  row shares a baseline. Grouping into lines *first* merges the two columns
+  into one line that straddles every candidate and destroys the signal.
+  Geometry first, lines second.
+- **Detect per page, not per document.** A paper's title page, its body, and
+  its references pages can differ, and per-page detection handles that for
+  free.
+
+Rejected alternative: looking for a **blank vertical strip** (zero ink over a
+≥12pt band). Tried first, and it found nothing on the real two-column paper —
+a single full-width figure or caption closes the gutter and the test collapses
+to "no columns". Counting crossings degrades gracefully where a binary
+occupancy test does not.
+
+### Full-width elements: banding
+
+Once a gutter is found, items are cut into left, right, and **full-width**
+(those crossing it — a title, a banner figure caption, a table). Full-width
+lines act as horizontal rules dividing the page into bands, and reading runs
+band by band: everything above the first full-width line (left column, then
+right), then that line, then the next band.
+
+Without this, a page that opens with a full-width title over two columns reads
+its title somewhere in the middle of the left column. With it, the ResNet title
+page comes out title → authors → affiliation → abstract, correctly.
+
+### Block boundaries, and why they exist
+
+Extraction emits `\n` between blocks and spaces within them. The chunker
+(Phase 2) treats `\n` as a hard boundary, which is what stops a heading being
+glued to the paragraph beneath it. Two signals mark a boundary:
+
+- **Vertical gap** greater than 1.4× the normal line spacing. "Normal" is the
+  25th percentile of gaps, *not* the median: within a paragraph, leading is
+  regular and tight, so the bottom quartile is the leading. The median breaks
+  down on short blocks — a three-line block ending in a heading has gaps
+  [12, 48] and a median of 30, which declares the heading to be normal spacing.
+- **Type size change** over 5%. Measured on the ResNet paper: body 10.0pt,
+  subsection heading 11.0pt, section heading 12.0pt. Spacing alone misses the
+  heading-to-heading transition by a tenth of a point; size catches it cleanly.
+  Within a paragraph the size is constant, so any real change marks structure.
+
+`1.4` and `5%` are tuned against real documents, and both are recorded here
+because they are exactly the kind of magic number that looks arbitrary later.
+
+### Spacing and hyphenation
+
+The PDF's **own space runs are preserved**, not discarded and re-derived. An
+early version filtered out whitespace items before assembling lines, which
+threw away the most reliable spacing information in the file and produced
+`withxdenoting`. Coordinates are the *fallback*, for documents that encode no
+spaces: a gap wider than 0.18 × type size inserts one. That constant is also
+measured — a real inter-word space in the ResNet paper is 2.41pt against a 10pt
+type size, so a threshold at 0.25 (2.5pt) fuses words.
+
+A trailing hyphen before a lowercase word is treated as a word broken across
+lines and rejoined. This is wrong for a genuine compound that happens to break
+at its hyphen (`multi-` / `head` → `multihead`), which is rarer than broken
+words and costs a word rather than a sentence.
+
+### Where this will break
+
+Stated plainly, because the heuristic is confident and wrong in specific ways:
+
+- **Three or more columns.** The detector finds one gutter. A three-column
+  newsletter reads as two columns with one of them scrambled.
+- **Tables.** Column gaps inside a wide table look exactly like a page gutter
+  to a crossing-count sweep. Tabular data will interleave.
+- **Rotated or vertical text**, and right-to-left scripts. Everything here
+  assumes left-to-right rows with a shared baseline.
+- **Sidebars and pull quotes** that sit inside a column's x-range but are not
+  part of its flow get read inline, mid-sentence.
+- **Mathematics.** Displayed equations are laid out in two dimensions and are
+  linearised into nonsense (`QKT`, stray `√`). They are read aloud as gibberish.
+  Out of scope to fix; worth knowing before wondering why.
+- **Figures.** In-figure labels sit at arbitrary positions and are pulled into
+  the text near their y-coordinate, so a caption can arrive with axis labels
+  attached.
+
+### Detecting a scanned PDF
+
+`hasTextLayer` is false when average extracted characters per page fall below
+**100**. A page of ordinary prose holds 1500–3000, so the threshold is an order
+of magnitude clear of any real text page. It is not zero because scanned PDFs
+are rarely perfectly empty — a producer watermark or a stamped page number is
+common — and a zero test would call such a file readable and then read four
+words aloud.
+
+### Quarantining pdf.js's `any`
+
+pdf.js declares `TextItem.transform` as `Array<any>`, so the x and y
+translation arrive untyped. Hard rule 2 bans `any` in our code, and a cast
+would be a lie — nothing guarantees those entries are numbers.
+
+`toPositionedItem()` in `lib/extractPdf.ts` is the single place this surface is
+touched. It validates with `typeof` and `Number.isFinite` and returns
+`PositionedItem | null`; items that fail are dropped, because an item with no
+position cannot be placed in reading order and a `NaN` would poison the
+geometry for the whole page. One boundary, one runtime check, honest types
+everywhere downstream.
 
 ---
 

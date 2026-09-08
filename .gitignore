@@ -45,3 +45,6 @@ next-env.d.ts
 
 # test fixtures (PDFs are large and not ours to redistribute)
 test-pdfs/
+
+# pdf.js runtime assets, copied from node_modules by scripts/copy-pdf-assets.mjs
+public/pdfjs/
