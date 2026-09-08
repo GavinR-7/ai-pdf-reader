@@ -3,7 +3,7 @@
 A running record of the decisions in this codebase: what was chosen, what the
 alternative was, and why this one won. Appended to as each phase lands.
 
-**Status:** Phase 2 complete (sentence chunking).
+**Status:** Phase 3 complete (the player).
 
 ---
 
@@ -412,6 +412,142 @@ chunking errors: in-figure axis labels ("weight layer", "relu"), e-mail
 addresses, and linearised mathematics. Removing rotated text (the vertical
 arXiv stamp down the side of page 1) fixed the one class that was genuinely
 severing sentences.
+
+---
+
+## The player (Phase 3)
+
+Four pieces, split along the line between "logic that can be tested" and
+"behaviour that can only be heard":
+
+| File | Job | Tested |
+|---|---|---|
+| `lib/ttsProvider.ts` | the provider interface | types only |
+| `lib/playbackQueue.ts` | ordering, cancellation, lookahead | 12 unit tests |
+| `lib/webSpeechProvider.ts` | the browser engine and its defects | by hand |
+| `hooks/usePlayer.ts` | React state binding | by hand |
+
+The queue is deliberately *not* inside the hook. Cancellation is the part most
+likely to hide a bug you can only find by listening, so it is a plain async
+function over an injected provider, and the tests drive it with a fake that can
+be made to hang mid-sentence on command.
+
+### The cancellation model
+
+There is **exactly one `AbortSignal` per run**, and every control that changes
+what should be heard goes through the same path: abort the run in flight, then
+start a new one. Pause, stop, jump-to-sentence, next, previous, a speed change
+and a voice change are all that same operation. Nothing else stops a run, so
+there is one place to reason about and one place to get right.
+
+Three properties make it hold together:
+
+- **`speak` resolves on abort, it does not reject.** Cancellation is the reader
+  pressing pause, not a failure. Rejecting would mean wrapping every step in
+  try/catch and distinguishing real synthesis errors from ordinary pauses by
+  inspecting exceptions. Instead the loop checks `signal.aborted` and the
+  provider contract states this explicitly.
+- **The signal is checked *after* every await, not just at the top.** An abort
+  that lands while a sentence is mid-utterance must leave the index *on that
+  sentence*, so resuming repeats it rather than skipping it. There is a test
+  named for exactly this, because the bug it prevents — "pause and resume
+  silently skips a sentence" — is easy to introduce and hard to notice.
+- **No orphaned utterances.** `pause()` aborts the signal *and* calls
+  `provider.cancel()`, and the provider tears down its engine state. The hook
+  also halts on unmount, so navigating away does not leave a voice talking to
+  an empty room.
+
+### Lookahead: how a network provider drops in unchanged
+
+`TTSProvider` has an optional `prepare(chunk, signal)`. The queue calls it for
+the next `LOOKAHEAD` (2) chunks **and never awaits it**:
+
+```
+handlers.onChunkStart(index);
+for (ahead of 1..LOOKAHEAD) void provider.prepare?.(chunks[index + ahead], signal);
+await provider.speak(chunk, signal);
+```
+
+Web Speech has nothing to prefetch and does not implement `prepare`, so today
+this is a no-op. But the *shape* is what has to be right now: an HTTP-backed
+provider fetches and caches inside `prepare`, so by the time the queue reaches
+that chunk the audio is already in hand and there is no gap between sentences.
+
+Two chunks of runway rather than one, because at a normal rate a sentence is
+only a few seconds and a network round trip needs more than one sentence of
+margin to never be the reason for a gap.
+
+Because `prepare` is fired and never awaited, and its rejections are swallowed,
+**a failing or slow lookahead can only fail to help — it can never stall or
+break playback.** There is a test for a provider whose `prepare` always throws,
+and one for a provider that has no `prepare` at all.
+
+Nothing in `Reader.tsx` or `PlayerControls.tsx` knows a provider exists. They
+consume `usePlayer`'s state and call its controls, so swapping the provider is
+a one-line change at the `useMemo` that constructs it.
+
+### Web Speech's three defects
+
+The API is free, local and zero-latency, and its `onend` gives sentence-level
+sync directly — no timing estimation anywhere, which is why the highlight is
+exact rather than approximate. It is also unreliable in three specific ways,
+each worked around and commented at the site of the workaround:
+
+**1. `getVoices()` returns `[]` until the engine loads its voice list.** On
+Chrome the list arrives asynchronously, announced by a `voiceschanged` event,
+and a call at page load returns empty with no hint that waiting would help. The
+naive fix — always wait for the event — *hangs* on browsers where the list is
+ready immediately and the event therefore never fires. So: return synchronously
+if the list is already populated; otherwise wait for the event **with a 2s
+timeout** and take whatever exists when it expires.
+
+**2. Chrome silently abandons long utterances after ~15 seconds.** No `onend`,
+no `onerror` — the queue waits forever on a promise that will never settle and
+playback appears to freeze mid-document. Worked around by toggling
+`pause()`/`resume()` on a 10-second timer while speaking, which resets the
+engine's watchdog. This is not hypothetical: chunks are capped at 400
+characters, which at 0.75× is comfortably over 15 seconds.
+
+**3. `cancel()` then `speak()` in the same task is a race.** `cancel()` is
+processed asynchronously; the new utterance is often swallowed by the in-flight
+cancel and simply never plays, so the reader clicks a sentence and gets
+silence. Two guards: `speak` waits for the engine to report itself quiet (poll,
+250ms cap) and then yields one more turn, and an **epoch counter** invalidates
+events from cancelled utterances — a late `onend` from a superseded utterance
+would otherwise resolve the wrong promise and skip a sentence.
+
+### Auto-scroll follows input events, not scroll events
+
+The obvious implementation watches `scroll` and stops following when one
+arrives it did not cause. It does not work: `scrollIntoView({behavior:
+"smooth"})` emits a stream of scroll events over several hundred milliseconds,
+indistinguishable from a person dragging, so the feature disables itself every
+single time it works. Guarding with an "ignore scrolls for the next N ms" flag
+trades that for a window in which genuine user scrolls are swallowed.
+
+`wheel`, `touchmove` and the scrolling keys carry no such ambiguity — they only
+fire when a person does something. Following stops on the first one, and
+resumes when the reader **clicks a sentence**, which is an equally unambiguous
+signal that they want the player to lead again. A button appears while
+following is off, so the state is visible rather than mysterious.
+
+### Reading interface decisions
+
+- **Every sentence is a `<button>`.** That is the accessible way to say "click
+  to jump here": focusable, keyboard-reachable, announced as actionable. Styled
+  back down to inherit the surrounding prose, it costs nothing visually.
+- **The highlight is a wash, not a block.** A hard highlight fights the text it
+  is meant to help you follow. A tint plus a 2px leading edge marks position
+  without obscuring the words.
+- **~66-character measure**, set in `ch` so it tracks the font rather than a
+  guessed pixel width.
+- **Serif for the document, sans for the interface.** The reader should never
+  have to work out whether something is content or chrome.
+- **The transport bar is pinned to the bottom**, because this is mobile-first
+  and the bottom of the screen is where a thumb is.
+- **Headings are detected at render time**, not stored on `Chunk`. Whether a
+  short unpunctuated run looks like a heading is a presentation question; the
+  domain type stays as Phase 0 defined it.
 
 ---
 

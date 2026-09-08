@@ -1,7 +1,13 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { DropZone } from "@/components/DropZone";
+import { PlayerControls } from "@/components/PlayerControls";
+import { Reader } from "@/components/Reader";
+import { usePlayer } from "@/hooks/usePlayer";
+import { useFollowScroll } from "@/hooks/useFollowScroll";
+import { chunkDocument } from "@/lib/chunker";
+import { WebSpeechProvider, isWebSpeechSupported } from "@/lib/webSpeechProvider";
 import type { ExtractedPdf, ExtractionProgress } from "@/lib/extractPdf";
 
 type Status =
@@ -53,16 +59,18 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-5xl px-5 py-10 sm:px-8 sm:py-16">
-      <header className="mb-10">
-        <h1 className="font-serif text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
-          PDF Reader
-        </h1>
-        <p className="mt-2 max-w-prose text-sm leading-relaxed text-ink-muted">
-          Reads a PDF aloud sentence by sentence, and grounds every key point in
-          the sentences it came from.
-        </p>
-      </header>
+    <main className="mx-auto min-h-screen w-full max-w-3xl px-5 pt-10 sm:px-8 sm:pt-16">
+      {status.kind !== "ready" && (
+        <header className="mb-10">
+          <h1 className="font-serif text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
+            PDF Reader
+          </h1>
+          <p className="mt-2 max-w-prose text-sm leading-relaxed text-ink-muted">
+            Reads a PDF aloud sentence by sentence, and grounds every key point
+            in the sentences it came from.
+          </p>
+        </header>
+      )}
 
       {status.kind === "idle" && <DropZone onFile={handleFile} />}
 
@@ -85,7 +93,7 @@ export default function Home() {
       )}
 
       {status.kind === "ready" && (
-        <ExtractionReview document={status.document} onReset={reset} />
+        <DocumentView document={status.document} onReset={reset} />
       )}
     </main>
   );
@@ -127,67 +135,93 @@ function ExtractingPanel({
   );
 }
 
-/**
- * Phase 1's deliverable: show the extracted text so reading order can be
- * verified by eye before anything is built on top of it. The column count per
- * page is surfaced because it is the single most useful thing to check — if a
- * two-column paper reports one column, the text below it will be interleaved.
- */
-function ExtractionReview({
+function DocumentView({
   document: parsed,
   onReset,
 }: {
   document: ExtractedPdf;
   onReset: () => void;
 }) {
-  const totalChars = parsed.pages.reduce((sum, page) => sum + page.text.length, 0);
+  // Memoised because `usePlayer` restarts playback whenever the chunk array's
+  // identity changes — re-chunking on every render would abort the utterance
+  // in flight on every state update, which sounds exactly as bad as it reads.
+  const chunks = useMemo(() => chunkDocument(parsed.pages), [parsed.pages]);
+  const provider = useMemo(() => new WebSpeechProvider(), []);
+  const player = usePlayer(chunks, provider);
+  const { following, resume, activeRef } = useFollowScroll(player.index);
+
+  const selectChunk = useCallback(
+    (index: number) => {
+      player.jumpTo(index);
+      // Clicking a sentence is an unambiguous "follow the player again".
+      resume();
+    },
+    [player, resume],
+  );
+
+  if (!parsed.hasTextLayer) {
+    return (
+      <>
+        <DocumentHeader parsed={parsed} chunkCount={0} onReset={onReset} />
+        <ScannedNotice />
+      </>
+    );
+  }
 
   return (
-    <div>
-      <div className="mb-8 flex flex-wrap items-baseline justify-between gap-4 border-b border-rule pb-4">
-        <div>
-          <h2 className="font-serif text-xl font-semibold text-ink">{parsed.filename}</h2>
-          <p className="mt-1 text-xs tabular-nums text-ink-muted">
-            {parsed.pageCount} pages · {totalChars.toLocaleString()} characters ·{" "}
-            {Math.round(totalChars / Math.max(parsed.pageCount, 1))} per page
-          </p>
-        </div>
-        <button
-          onClick={onReset}
-          className="rounded-md border border-rule px-3 py-1.5 text-sm text-ink hover:border-ink-faint"
-        >
-          Choose another
-        </button>
-      </div>
+    <>
+      <DocumentHeader parsed={parsed} chunkCount={chunks.length} onReset={onReset} />
 
-      {!parsed.hasTextLayer && <ScannedNotice />}
-
-      {parsed.hasTextLayer && (
-        <div className="space-y-10">
-          {parsed.pages.map((page, index) => (
-            <section key={page.pageNumber}>
-              <div className="mb-3 flex items-center gap-3">
-                <h3 className="text-xs font-medium uppercase tracking-wider text-ink-faint">
-                  Page {page.pageNumber}
-                </h3>
-                <span className="rounded-full border border-rule px-2 py-0.5 text-[11px] text-ink-muted">
-                  {parsed.columnsPerPage[index] === 2 ? "2 columns" : "1 column"}
-                </span>
-                <span className="text-[11px] tabular-nums text-ink-faint">
-                  {page.text.length.toLocaleString()} chars
-                </span>
-              </div>
-              <div className="measure whitespace-pre-wrap font-serif text-[1.0625rem] leading-[1.7] text-ink">
-                {page.text.length > 0 ? (
-                  page.text
-                ) : (
-                  <span className="italic text-ink-faint">No text on this page.</span>
-                )}
-              </div>
-            </section>
-          ))}
-        </div>
+      {!isWebSpeechSupported() && (
+        <p className="mb-6 rounded-lg border border-rule bg-accent-soft p-4 text-sm text-ink-muted">
+          This browser has no speech synthesis, so the document can be read on
+          screen but not aloud.
+        </p>
       )}
+
+      <Reader
+        chunks={chunks}
+        activeIndex={player.index}
+        onSelect={selectChunk}
+        activeRef={activeRef}
+      />
+
+      <PlayerControls
+        player={player}
+        totalChunks={chunks.length}
+        following={following}
+        onResumeFollow={resume}
+      />
+    </>
+  );
+}
+
+function DocumentHeader({
+  parsed,
+  chunkCount,
+  onReset,
+}: {
+  parsed: ExtractedPdf;
+  chunkCount: number;
+  onReset: () => void;
+}) {
+  const twoColumnPages = parsed.columnsPerPage.filter((count) => count === 2).length;
+  return (
+    <div className="mb-8 flex flex-wrap items-baseline justify-between gap-4 border-b border-rule pb-4">
+      <div>
+        <h1 className="font-serif text-xl font-semibold text-ink">{parsed.filename}</h1>
+        <p className="mt-1 font-sans text-xs tabular-nums text-ink-muted">
+          {parsed.pageCount} pages
+          {chunkCount > 0 && <> · {chunkCount.toLocaleString()} sentences</>}
+          {twoColumnPages > 0 && <> · {twoColumnPages} two-column</>}
+        </p>
+      </div>
+      <button
+        onClick={onReset}
+        className="rounded-md border border-rule px-3 py-1.5 font-sans text-sm text-ink hover:border-ink-faint"
+      >
+        Choose another
+      </button>
     </div>
   );
 }
@@ -195,9 +229,9 @@ function ExtractionReview({
 function ScannedNotice() {
   return (
     <div className="rounded-lg border border-rule bg-accent-soft p-6">
-      <h3 className="font-serif text-lg font-semibold text-ink">
+      <h2 className="font-serif text-lg font-semibold text-ink">
         This PDF has no text layer
-      </h3>
+      </h2>
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-ink-muted">
         It looks like a scan — page images with no selectable text behind them.
         Reading it aloud would produce silence, so the reader is not offered.
