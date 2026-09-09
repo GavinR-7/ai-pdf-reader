@@ -3,7 +3,7 @@
 A running record of the decisions in this codebase: what was chosen, what the
 alternative was, and why this one won. Appended to as each phase lands.
 
-**Status:** Phase 3 complete (the player).
+**Status:** Phase 4 complete (summary and grounded key points).
 
 ---
 
@@ -548,6 +548,113 @@ following is off, so the state is visible rather than mysterious.
 - **Headings are detected at render time**, not stored on `Chunk`. Whether a
   short unpunctuated run looks like a heading is a presentation question; the
   domain type stays as Phase 0 defined it.
+
+---
+
+## Summary and grounded key points (Phase 4)
+
+`app/api/analyze/route.ts` is the only server-side code in the app and the only
+place the Anthropic key is read. The PDF file never reaches a server; its
+**text** does when the reader asks for analysis, which is a real distinction
+and one the UI states before the button is pressed.
+
+Analysis is explicitly triggered, never automatic — it is the one action that
+sends data off the device and the one that costs money.
+
+### Two independent layers, and why both are needed
+
+| Layer | Guarantees | Cannot guarantee |
+|---|---|---|
+| Structured outputs (`output_config.format`) | The response **is** JSON matching the schema | That the integers in `chunkIds` mean anything |
+| `validateCitations` | Every citation names a chunk that exists | — |
+
+A schema can require an array of integers. It cannot know *which* integers
+exist in the document that was submitted. So the schema removes "the model
+wrote prose instead of JSON" as a failure mode, and citation validation removes
+"the model cited sentence 4,000 of a 300-sentence document". Neither
+substitutes for the other.
+
+### Why citation validation exists at all
+
+A model asked to cite its sources will occasionally cite a chunk that is not
+there. Not often, and not maliciously — but **a summary whose grounding is
+decorative is worse than a summary with no grounding**, because it looks
+trustworthy. The entire promise of the key-points panel is that any claim can
+be traced back to a sentence; if that promise is unenforced, the panel is
+actively misleading.
+
+So the citations are not trusted, they are checked, and the rule is a range
+test: an ID is valid iff `0 <= id < chunks.length`. Cheap, total, and
+impossible to get subtly wrong — which is the payoff for chunk IDs being
+sequential integers (see § Why chunk IDs are stable sequential integers).
+
+The policy, with a test for each case:
+
+- An ID outside the range is **dropped**.
+- A key point left with **zero** valid citations is **dropped entirely**,
+  not shown ungrounded.
+- A key point with a **mix** keeps the valid ones and is **flagged**, and the
+  flag is shown in the UI as "partly unverified" — a point whose grounding was
+  partly invented deserves more suspicion than one that was clean.
+- Duplicates are collapsed but **not** counted as dropped: nothing was
+  invented, it was just said twice.
+- The counts are reported and **displayed**. Burying the result would defeat
+  the point of checking.
+
+**It runs server-side**, before the response is sent. A client-side check would
+be a suggestion; this is a guarantee about what the UI can possibly receive.
+
+### Model and request shape
+
+`claude-opus-5`, streamed, with adaptive thinking at `medium` effort.
+
+- **Streamed** rather than a plain `create`: a long document plus thinking can
+  run past the SDK's HTTP timeout on a non-streaming request.
+  `finalMessage()` still yields one complete response to work with.
+- **`maxDuration = 60`** on the route, because Vercel's default serverless
+  timeout would otherwise cut the request off mid-flight.
+- **Plain JSON Schema, not Zod.** The SDK's `jsonSchemaOutputFormat` helper
+  types `parsed_output` directly from the schema object. It is the only schema
+  in the project and it is data rather than code; adding a validation library
+  to express one object shape would be a dependency to learn for no benefit.
+- **A defensive parser is kept anyway** (`parseAnalysis`). Structured outputs
+  should make it unreachable, and it exists because the alternative to
+  "throw a clear error" is "read `undefined.map` in a React component". It
+  tolerates the two things models do even when told not to: markdown fences
+  and a sentence of preamble.
+
+### Documents too large
+
+Over an estimated **150,000 tokens** the request is **rejected with an
+explanation** and nothing is truncated. A summary of the first third of a
+document, presented as a summary of the document, is a wrong answer that looks
+like a right one.
+
+Two honest notes about that number. It is **not** a context limit — Claude
+Opus 5 has a 1M-token window and a 150k document fits comfortably. It is a cost
+and latency guard: at $5/1M input tokens, 150k tokens is roughly $0.75 of input
+per analysis. And the estimate is characters ÷ 4, not a token count: a second
+network round trip to refine a number used against a deliberately generous
+threshold is not worth it. `client.messages.countTokens` is the exact answer if
+documents near the limit start being wrongly rejected.
+
+### Error handling
+
+Every failure has its own status and a message written for a reader rather than
+a log, and each was exercised against the running route:
+
+| Condition | Status |
+|---|---|
+| No `ANTHROPIC_API_KEY` on the server | 503 |
+| Body is not JSON / no `chunks` / not an array / empty / malformed chunk | 400 |
+| Document over the token limit | 413 |
+| Model declined the request (`stop_reason: "refusal"`) | 422 |
+| Rate limited | 429 |
+| Response unparseable, key rejected, or upstream API error | 502 |
+| Could not reach the API | 504 |
+
+Cost is logged server-side per request (input/output tokens and a dollar
+estimate at Opus 5 rates) so the economics are visible during development.
 
 ---
 

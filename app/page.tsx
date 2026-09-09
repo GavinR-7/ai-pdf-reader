@@ -4,8 +4,10 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { DropZone } from "@/components/DropZone";
 import { PlayerControls } from "@/components/PlayerControls";
 import { Reader } from "@/components/Reader";
+import { SummaryPanel } from "@/components/SummaryPanel";
 import { usePlayer } from "@/hooks/usePlayer";
 import { useFollowScroll } from "@/hooks/useFollowScroll";
+import { useAnalysis } from "@/hooks/useAnalysis";
 import { chunkDocument } from "@/lib/chunker";
 import { WebSpeechProvider, isWebSpeechSupported } from "@/lib/webSpeechProvider";
 import type { ExtractedPdf, ExtractionProgress } from "@/lib/extractPdf";
@@ -59,7 +61,7 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-3xl px-5 pt-10 sm:px-8 sm:pt-16">
+    <main className="mx-auto min-h-screen w-full max-w-6xl px-5 pt-10 sm:px-8 sm:pt-16">
       {status.kind !== "ready" && (
         <header className="mb-10">
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
@@ -72,7 +74,11 @@ export default function Home() {
         </header>
       )}
 
-      {status.kind === "idle" && <DropZone onFile={handleFile} />}
+      {status.kind === "idle" && (
+        <div className="max-w-3xl">
+          <DropZone onFile={handleFile} />
+        </div>
+      )}
 
       {status.kind === "extracting" && (
         <ExtractingPanel filename={status.filename} progress={status.progress} />
@@ -149,6 +155,7 @@ function DocumentView({
   const provider = useMemo(() => new WebSpeechProvider(), []);
   const player = usePlayer(chunks, provider);
   const { following, resume, activeRef } = useFollowScroll(player.index);
+  const analysis = useAnalysis(chunks);
 
   const selectChunk = useCallback(
     (index: number) => {
@@ -161,10 +168,10 @@ function DocumentView({
 
   if (!parsed.hasTextLayer) {
     return (
-      <>
+      <div className="max-w-3xl">
         <DocumentHeader parsed={parsed} chunkCount={0} onReset={onReset} />
         <ScannedNotice />
-      </>
+      </div>
     );
   }
 
@@ -179,12 +186,30 @@ function DocumentView({
         </p>
       )}
 
-      <Reader
-        chunks={chunks}
-        activeIndex={player.index}
-        onSelect={selectChunk}
-        activeRef={activeRef}
-      />
+      {/*
+        The summary sits beside the reader on a wide screen and above it on a
+        narrow one. Above rather than below on mobile because it is the thing
+        you want first when deciding whether to read at all.
+      */}
+      <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start">
+        <div className="order-2 lg:order-1">
+          <Reader
+            chunks={chunks}
+            activeIndex={player.index}
+            onSelect={selectChunk}
+            activeRef={activeRef}
+          />
+        </div>
+        <div className="order-1 lg:order-2 lg:sticky lg:top-8">
+          <SummaryPanel
+            state={analysis.state}
+            chunks={chunks}
+            onAnalyze={analysis.analyze}
+            onJumpTo={selectChunk}
+            activeIndex={player.index}
+          />
+        </div>
+      </div>
 
       <PlayerControls
         player={player}
